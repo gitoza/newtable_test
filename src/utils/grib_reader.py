@@ -42,18 +42,6 @@ def check_definition_path() -> None:
 
 
 # ---------------------------------------------------------------------------
-# テンプレート5.200 tank2 符号絶対値補正用定数
-# ---------------------------------------------------------------------------
-
-# 代表値のスケール因子（仕様書より固定値1 → 10^-1 = 0.1）
-_TANK2_REPR_SCALE = 0.1
-
-# 符号絶対値表現の符号ビット閾値（0x8000 × 0.1 = 3276.8）
-# これを超える代表値はeccodesによる符号ビット誤読と判断する
-_TANK2_SIGN_BIT_VALUE = 0x8000 * _TANK2_REPR_SCALE  # = 3276.8
-
-
-# ---------------------------------------------------------------------------
 # GRIB2 Sec4-7繰り返し構造の分割読み込み
 # ---------------------------------------------------------------------------
 
@@ -148,20 +136,6 @@ def _get_tank_id_from_sec4(sec4_bytes: bytes) -> str:
             238 → level5
                 
     """
-    """
-    if len(sec4_bytes) < 28:
-        return "unknown"
-    surface_type = sec4_bytes[22]
-    if surface_type == 200:
-        return "swi"
-    if surface_type == 201:
-        tank_num = int.from_bytes(sec4_bytes[24:28], 'big')
-        if tank_num == 1:
-            return "tank1"
-        if tank_num == 2:
-            return "tank2"
-    return "unknown"
-    """
     surface_type = sec4_bytes[10]
     if surface_type == 219:
         return "level2"
@@ -179,7 +153,6 @@ def _get_tank_id_from_sec4(sec4_bytes: bytes) -> str:
 def read_grib2_to_dataframe(
     filepath: Path | str,
     valid_datetime: datetime | None = None,
-    rain_gt: float | None = None,
     include_tank_id: bool = False,
 ) -> pd.DataFrame:
     """
@@ -189,7 +162,6 @@ def read_grib2_to_dataframe(
     ----------
     filepath        : GRIB2ファイルパス
     valid_datetime  : ファイルの観測日時（ファイル名から渡す）
-    rain_gt         : None でなければ value > rain_gt のみ残す（Stage1 フィルタ）
     include_tank_id : True の場合、あと何レベル区分を "tank_id" 列として付加する
                       ("level2" / "level3" / "level4" / "level5" / "unknown")
 
@@ -233,9 +205,6 @@ def read_grib2_to_dataframe(
             missing_mask = np.isclose(values, missing)
                         
             mask = ~missing_mask
-
-            if rain_gt is not None:
-                mask = mask & (values > rain_gt)
 
             if mask.any():
                 lat_masked = lat[mask]
@@ -356,7 +325,6 @@ def latlon_to_mesh3_array(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
 def read_multiple_files(
     filepaths: list[Path],
     datetime_map: dict[Path, datetime] | None = None,
-    rain_gt: float | None = None,
     sleep_sec: float = 0.0,
 ) -> pd.DataFrame:
     """複数 GRIB2ファイルを順次読み込み、結合した DataFrame を返す。"""
@@ -365,7 +333,7 @@ def read_multiple_files(
     dfs: list[pd.DataFrame] = []
     for fp in filepaths:
         dt = datetime_map.get(fp) if datetime_map else None
-        df = read_grib2_to_dataframe(fp, valid_datetime=dt, rain_gt=rain_gt)
+        df = read_grib2_to_dataframe(fp, valid_datetime=dt)
         if not df.empty:
             dfs.append(df)
         if sleep_sec > 0:

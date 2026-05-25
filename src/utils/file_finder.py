@@ -110,7 +110,6 @@ def _days_in_month(year: int, month: int) -> list[date]:
 # ---------------------------------------------------------------------------
 
 PATTERNS = {
-    "rain": "Z__C_RJTD_*_SRF_GPV_Ggis1km_Prr60lv_ANAL_grib2.bin",
     "atonan": "Z__C_RJTD_*_MET_GPV_Ggis1km_Psw_JRltg_Aper10min_ANAL_N1_grib2.bin",
 }
 
@@ -156,7 +155,7 @@ def find_grib2_files(
 
     Parameters
     ----------
-    data_type       : "rain" または "atonan"
+    data_type       : "atonan"
     year, month     : 対象年月
     settings, secret: 設定辞書
     top_of_hour_only: True の場合、正時ファイルのみ返す ←   14時のみ返したい
@@ -167,7 +166,7 @@ def find_grib2_files(
     ファイルパスのリスト（昇順ソート済み）
     """
     nas = secret["nas"]
-    root_key = "rain_root" if data_type == "rain" else "atonan_root"
+    root_key = "atonan_root"
     root = Path(nas[root_key])
 
     pattern = PATTERNS.get(data_type)
@@ -192,7 +191,7 @@ def find_grib2_files(
 
             # 年月フィルタ
             if dt.year != year or dt.month != month:
-               continue
+                continue
 
             # 時刻フィルタ（14時のみ）
             if top_of_hour_only and not _is_target_hour(dt):
@@ -201,31 +200,9 @@ def find_grib2_files(
 
             found.append(filepath)
 
-
-    # ✅ ------------------------------
-    # ケース2: rain（日別ディレクトリ）
-    # ✅ ------------------------------
     else:
-
-        target_days = (
-            [date(year, month, day)] if day is not None else _days_in_month(year, month)
-        )
-
-        for d in target_days:
-            day_dir = root / f"{year}" / f"{month:02d}" / f"{d.day:02d}"
-
-            if not day_dir.exists():
-                missing_days.append(str(d))
-                logger.debug("日付ディレクトリなし: %s", day_dir)
-                continue
-
-            for filepath in day_dir.glob(pattern):
-                dt = _parse_datetime_from_filename(filepath)
-                if dt is None:
-                    continue
-                if top_of_hour_only and not _is_target_hour(dt):
-                    continue
-                found.append(filepath)
+        logger.info("%s %d-%02d: エラー ファイル未発見", data_type, year, month)
+        
 
     if missing_days:
         logger.debug("%s %d-%02d: %d日分のディレクトリなし", data_type, year, month, len(missing_days))
@@ -244,21 +221,18 @@ def iter_monthly_file_pairs(
     secret: dict,
 ) -> Generator[tuple[int, int, list[Path], list[Path]], None, None]:
     """
-    settings に定義された全年月について (year, month, rain_files, atonan_files) を yield する。
+    settings に定義された全年月について (year, month, atonan_files) を yield する。
     """
     years: list[int] = settings["period"]["years"]
     months: list[int] = settings["period"]["months"]
 
     for year in years:
         for month in months:
-            rain_files = find_grib2_files(
-                "rain", year, month, settings, secret, top_of_hour_only=True
-            )
             atonan_files = find_grib2_files(
                 "atonan", year, month, settings, secret, top_of_hour_only=True
             )
                             
-            yield year, month, rain_files, atonan_files
+            yield year, month, atonan_files
 
 
 # ---------------------------------------------------------------------------
@@ -269,5 +243,5 @@ if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
     cfg, sec = load_config()
-    for y, m, r, a in iter_monthly_file_pairs(cfg, sec):
-        print(f"{y}-{m:02d}  rain={len(r)}  atonan={len(a)}")
+    for y, m, a in iter_monthly_file_pairs(cfg, sec):
+        print(f"{y}-{m:02d}  atonan={len(a)}")

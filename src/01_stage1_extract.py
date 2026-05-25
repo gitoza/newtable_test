@@ -12,12 +12,12 @@ k（kは
 
 処理内容:
   - あと何の GRIB2 を月別に読み込む あと何は日ごとに05UTCのデータを収集している
-  - Stage1 フィルタ: 解析雨量 > 0 のグリッド点のみ残す 
+  - Stage1 フィルタ: 解析雨量 > 0 のグリッド点のみ残す  ←    初期値（05UTC）を収集しているためフィルタリング不要
   - 4ワーカー並列で各月を処理し、Parquet として出力する
 
 出力ファイル名:
   stage1/{data_type}/{YYYY}_{MM}.parquet
-  例: stage1/rain/2023_07.parquet
+  例: stage1/level2/2023_07.parquet
 
 使用方法:
   python src/01_stage1_extract.py
@@ -134,7 +134,6 @@ def _process_one_month(
     filepaths: list[str],           # Path は pickle できない場合があるため str で渡す
     src_dir: str,                   # 子プロセスで sys.path に追加するため渡す
     output_dir: str,
-    rain_gt: float,
     sleep_between_files: float,
     parquet_compression: str,
     parquet_row_group_size: int,
@@ -146,16 +145,6 @@ def _process_one_month(
 
     Returns
     -------
-    rain の場合:
-        {"status": "ok"|"skipped"|"empty", "path": str, "rows": int}
-    soil の場合:
-        {"status": "ok"|"skipped"|"empty",
-         "subtypes": {
-             "swi":   {"status": ..., "path": ..., "rows": ...},
-             "tank1": {"status": ..., "path": ..., "rows": ...},
-             "tank2": {"status": ..., "path": ..., "rows": ...},
-         }}
-    
     atonanの場合：
         {"status": "ok"|"skipped"|"empty",
          "subtypes": {
@@ -183,7 +172,6 @@ def _process_one_month(
     )
     log = logging.getLogger(__name__)
 
-#    is_soil = (data_type == "soil")
     is_atonan = (data_type == "atonan")
 
     # ---- 出力パス決定 ----
@@ -245,7 +233,7 @@ def _process_one_month(
                 try:
                     df = read_grib2_to_dataframe(
                         fp, valid_datetime=valid_dt,
-                        rain_gt=None, include_tank_id=True,
+                        include_tank_id=True,
                     )
                     if not df.empty:
                         df["datetime"] = pd.to_datetime(df["datetime"])
@@ -296,7 +284,7 @@ def _process_one_month(
         return {"status": overall, "year": year, "month": month, "data_type": data_type,
                 "subtypes": subtype_results}
 
-    # ---- rain: ParquetWriter へ逐次書き込み ----
+    # ---- ParquetWriter へ逐次書き込み ----
     tmp_path = out_path.with_suffix(".tmp.parquet")
     n_rows = 0
     writer = None
@@ -308,7 +296,7 @@ def _process_one_month(
             valid_dt = _parse_dt(fp)
             try:
                 df = read_grib2_to_dataframe(
-                    fp, valid_datetime=valid_dt, rain_gt=rain_gt,
+                    fp, valid_datetime=valid_dt,
                 )
                 if not df.empty:
                     df["datetime"] = pd.to_datetime(df["datetime"])
@@ -369,7 +357,6 @@ def main(single_year: int | None = None, single_month: int | None = None, single
 
     nas_output    = secret["nas"]["output_root"]
     stage1_dir    = str(Path(nas_output) / settings["output"]["stage1_dir"])
-    rain_gt       = float(settings["stage1"]["rain_gt"])
     sleep_files   = float(settings["parallel"]["sleep_between_files"])
     compression   = settings["output"]["parquet_compression"]
     row_group_size = int(settings["output"]["parquet_row_group_size"])
@@ -378,49 +365,42 @@ def main(single_year: int | None = None, single_month: int | None = None, single
     months = [single_month] if single_month else settings["period"]["months"]
 
     logger.info(
-        "処理設定: years=%s  months=%s  day=%s  rain_gt=%.1f  workers=%d",
-        years, months, single_day, rain_gt, settings["parallel"]["max_workers"],
+        "処理設定: years=%s  months=%s  day=%s  workers=%d",
+        years, months, single_day, settings["parallel"]["max_workers"],
     )
 
     tasks: list[tuple] = []
-    total_rain_files = 0
-  #  total_soil_files = 0
     total_atonan_files = 0
+    data_type = "atonan"
 
     for year in years:
         for month in months:
-            for data_type in ("rain", "atonan"):
-                filepaths = find_grib2_files(
-                    data_type, year, month, settings, secret,
-                    top_of_hour_only=True, day=single_day,
-                )
-                if not filepaths:
-                    logger.warning("ファイルなし: %s %d-%02d", data_type, year, month)
-                    continue
-                n = len(filepaths)
-                logger.info("  発見: %s %d-%02d  %d files", data_type, year, month, n)
-                if data_type == "rain":
-                    total_rain_files += n
-                else:
-                    total_atonan_files += n
-                tasks.append((
-                    data_type, year, month,
-                    [str(p) for p in filepaths],
-                    str(_SRC_DIR),          # 子プロセスに src/ パスを渡す
-                    stage1_dir,
-                    rain_gt,
-                    sleep_files,
-                    compression,
-                    row_group_size,
-                    single_day,
-                ))
+            filepaths = find_grib2_files(
+                data_type, year, month, settings, secret,
+                top_of_hour_only=True, day=single_day,
+            )
+            if not filepaths:
+                logger.warning("ファイルなし: %s %d-%02d", data_type, year, month)
+                continue
+            n = len(filepaths)
+            logger.info("  発見: %s %d-%02d  %d files", data_type, year, month, n)
+            if data_type == "atonan":
+                total_atonan_files += n
+            tasks.append((
+                data_type, year, month,
+                [str(p) for p in filepaths],
+                str(_SRC_DIR),          # 子プロセスに src/ パスを渡す
+                stage1_dir,
+                sleep_files,
+                compression,
+                row_group_size,
+                single_day,
+            ))
 
-    rain_tasks = sum(1 for t in tasks if t[0] == "rain")
-#    soil_tasks = sum(1 for t in tasks if t[0] == "soil")
     atonan_tasks = sum(1 for t in tasks if t[0] == "atonan")
     logger.info(
-        "タスク数: %d  (rain: %d月分/%dfiles  atonan: %d月分/%dfiles)",
-        len(tasks), rain_tasks, total_rain_files, atonan_tasks, total_atonan_files,
+        "タスク数: %d  (atonan: %d月分/%dfiles)",
+        len(tasks), atonan_tasks, total_atonan_files,
     )
 
     results = run_with_pool(
