@@ -5,6 +5,7 @@ NAS上のGRIB2ファイルを日付・データ種別で検索するユーティ
 ファイル命名規則（気象庁標準）:
   解析雨量:     Z__C_RJTD_YYYYMMDDHHmm00_SRF_GPV_Ggis1km_Prr60lv_ANAL_grib2.bin
   土壌雨量指数: Z__C_RJTD_YYYYMMDDHHmm00_SRF_GPV_Ggis1km_Dssr_ANAL_grib2.bin
+  あと何ミリ: Z__C_RJTD_YYYYMMDDHHmm00_MET_GPV_Ggis1km_Psw_JRltg_Aper10min_ANAL_N1_grib2.bin
 
 NAS上のディレクトリ構成（実際）:
   {root}/{YYYY}/{MM}/{DD}/
@@ -65,6 +66,7 @@ def _load_secret(secret_path: Path) -> dict:
 
 
 def load_config(
+    settings_path: str | Path | None = None,
     secret_path: str | Path | None = None,
 ) -> tuple[dict, dict]:
     """
@@ -76,13 +78,17 @@ def load_config(
 
     パスを省略した場合は __file__ 基準でプロジェクトルートの config/ を自動解決する。
     """
+    if settings_path is None:
+        settings_path = _PROJECT_ROOT / "config" / "settings.yaml"
     if secret_path is None:
         secret_path = _PROJECT_ROOT / "config" / "secret.yaml"
-
+    settings_path = Path(settings_path)
     secret_path   = Path(secret_path)
 
+    with open(settings_path, encoding="utf-8") as f:
+        settings = yaml.safe_load(f)
     secret = _load_secret(secret_path)
-    return secret
+    return settings, secret
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +111,7 @@ def _days_in_month(year: int, month: int) -> list[date]:
 
 PATTERNS = {
     "rain": "Z__C_RJTD_*_SRF_GPV_Ggis1km_Prr60lv_ANAL_grib2.bin",
-    "soil": "Z__C_RJTD_*_SRF_GPV_Ggis1km_Psw_Aper10min_ANAL_grib2.bin",
+    "atonan": "Z__C_RJTD_*_MET_GPV_Ggis1km_Psw_JRltg_Aper10min_ANAL_N1_grib2.bin",
 }
 
 
@@ -125,7 +131,9 @@ def _parse_datetime_from_filename(filepath: Path) -> datetime | None:
 def _is_top_of_hour(dt: datetime) -> bool:
     """正時（分=0）かどうか判定する。"""
     return dt.minute == 0
-
+def _is_target_hour(dt: datetime) -> bool:
+    """09UTC 14時を判定"""
+    return dt.hour == 5 and dt.minute == 0
 
 # ---------------------------------------------------------------------------
 # メイン: ファイルリスト取得
@@ -148,10 +156,10 @@ def find_grib2_files(
 
     Parameters
     ----------
-    data_type       : "rain" または "soil"
+    data_type       : "rain" または "atonan"
     year, month     : 対象年月
     settings, secret: 設定辞書
-    top_of_hour_only: True の場合、正時ファイルのみ返す
+    top_of_hour_only: True の場合、正時ファイルのみ返す ←   14時のみ返したい
     day             : 指定した場合、その日のみ処理（単日テスト用）
 
     Returns
@@ -159,7 +167,7 @@ def find_grib2_files(
     ファイルパスのリスト（昇順ソート済み）
     """
     nas = secret["nas"]
-    root_key = "rain_root" if data_type == "rain" else "soil_root"
+    root_key = "rain_root" if data_type == "rain" else "atonan_root"
     root = Path(nas[root_key])
 
     pattern = PATTERNS.get(data_type)
@@ -169,25 +177,55 @@ def find_grib2_files(
     found: list[Path] = []
     missing_days: list[str] = []
 
-    target_days = (
-        [date(year, month, day)] if day is not None else _days_in_month(year, month)
-    )
 
-    for d in target_days:
-        day_dir = root / f"{year}" / f"{month:02d}" / f"{d.day:02d}"
+    # ✅ ------------------------------
+    # ケース1: atonan（単一ディレクトリ）
+    # ✅ ------------------------------
+    if data_type == "atonan":
 
-        if not day_dir.exists():
-            missing_days.append(str(d))
-            logger.debug("日付ディレクトリなし: %s", day_dir)
-            continue
+        for filepath in root.glob(pattern):
 
-        for filepath in day_dir.glob(pattern):
             dt = _parse_datetime_from_filename(filepath)
+
             if dt is None:
                 continue
-            if top_of_hour_only and not _is_top_of_hour(dt):
+
+            # 年月フィルタ
+            if dt.year != year or dt.month != month:
+               continue
+
+            # 時刻フィルタ（14時のみ）
+            if top_of_hour_only and not _is_target_hour(dt):
                 continue
+            
+
             found.append(filepath)
+
+
+    # ✅ ------------------------------
+    # ケース2: rain（日別ディレクトリ）
+    # ✅ ------------------------------
+    else:
+
+        target_days = (
+            [date(year, month, day)] if day is not None else _days_in_month(year, month)
+        )
+
+        for d in target_days:
+            day_dir = root / f"{year}" / f"{month:02d}" / f"{d.day:02d}"
+
+            if not day_dir.exists():
+                missing_days.append(str(d))
+                logger.debug("日付ディレクトリなし: %s", day_dir)
+                continue
+
+            for filepath in day_dir.glob(pattern):
+                dt = _parse_datetime_from_filename(filepath)
+                if dt is None:
+                    continue
+                if top_of_hour_only and not _is_target_hour(dt):
+                    continue
+                found.append(filepath)
 
     if missing_days:
         logger.debug("%s %d-%02d: %d日分のディレクトリなし", data_type, year, month, len(missing_days))
@@ -206,7 +244,7 @@ def iter_monthly_file_pairs(
     secret: dict,
 ) -> Generator[tuple[int, int, list[Path], list[Path]], None, None]:
     """
-    settings に定義された全年月について (year, month, rain_files, soil_files) を yield する。
+    settings に定義された全年月について (year, month, rain_files, atonan_files) を yield する。
     """
     years: list[int] = settings["period"]["years"]
     months: list[int] = settings["period"]["months"]
@@ -216,10 +254,11 @@ def iter_monthly_file_pairs(
             rain_files = find_grib2_files(
                 "rain", year, month, settings, secret, top_of_hour_only=True
             )
-            soil_files = find_grib2_files(
-                "soil", year, month, settings, secret, top_of_hour_only=True
+            atonan_files = find_grib2_files(
+                "atonan", year, month, settings, secret, top_of_hour_only=True
             )
-            yield year, month, rain_files, soil_files
+                            
+            yield year, month, rain_files, atonan_files
 
 
 # ---------------------------------------------------------------------------
@@ -230,5 +269,5 @@ if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
     cfg, sec = load_config()
-    for y, m, r, s in iter_monthly_file_pairs(cfg, sec):
-        print(f"{y}-{m:02d}  rain={len(r)}  soil={len(s)}")
+    for y, m, r, a in iter_monthly_file_pairs(cfg, sec):
+        print(f"{y}-{m:02d}  rain={len(r)}  atonan={len(a)}")
